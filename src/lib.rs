@@ -5,21 +5,25 @@
 //! A failure resistant, load balancing task pool.
 
 use std::sync::{Mutex, Arc};
-use std::sync::atomic::{AtomicBool, SeqCst};
 
-enum InternalMessage {
+enum WorkerMessage {
     Quit,
     Job(proc(): Send)
 }
 
+enum MonitorMessage {
+    Died,
+    Kill
+}
+
 struct Watcher {
-    channel: Sender<()>
+    monitor: Sender<MonitorMessage>
 }
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        // Don't panic
-        let _ = self.channel.send_opt(());
+        // Don't panic when this is dropped after the monitor task.
+        let _ = self.monitor.send_opt(Died);
     }
 }
 
@@ -27,30 +31,30 @@ impl Drop for Watcher {
 ///
 /// Spawns n + 1 tasks and respawns on subtask panic.
 pub struct TaskPool {
-    tx: Sender<InternalMessage>,
-    tasks: uint,
-    done: Arc<AtomicBool>
+    jobs: Sender<WorkerMessage>,
+    monitor: Sender<MonitorMessage>,
+    tasks: uint
 }
 
 impl TaskPool {
     /// Create a new TaskPool with n tasks.
     pub fn new(tasks: uint) -> TaskPool {
-        let (job_tx, job_rx) = channel::<InternalMessage>();
+        let (job_tx, job_rx) = channel::<WorkerMessage>();
 
-        let (quit_tx, quit_rx) = channel::<()>();
-        let done = Arc::new(AtomicBool::new(false));
+        let (quit_tx, quit_rx) = channel::<MonitorMessage>();
 
         let job_rx = Arc::new(Mutex::new(job_rx));
 
         // Monitoring task that refreshes the task pool
         // if spawned tasks fail or end.
         let monitor_jobs = job_rx.clone();
-        let monitor_done = done.clone();
         let monitor_quit = quit_tx.clone();
         spawn(proc() {
-            for _ in quit_rx.iter() {
-                if monitor_done.load(SeqCst) { break }
-                spawn_in_pool(monitor_jobs.clone(), monitor_quit.clone())
+            for message in quit_rx.iter() {
+                match message {
+                    Died => spawn_in_pool(monitor_jobs.clone(), monitor_quit.clone()),
+                    Kill => return
+                }
             }
         });
 
@@ -59,33 +63,42 @@ impl TaskPool {
             spawn_in_pool(job_rx.clone(), quit_tx.clone());
         }
 
-        TaskPool { tx: job_tx, tasks: tasks, done: done }
+        TaskPool { jobs: job_tx, monitor: quit_tx, tasks: tasks }
     }
 
     /// Run this job on any of the tasks in the taskpool.
     pub fn execute(&mut self, job: proc(): Send) {
-        self.tx.send(Job(job))
+        self.jobs.send(Job(job))
     }
 }
 
 impl Drop for TaskPool {
     fn drop(&mut self) {
-        self.done.swap(true, SeqCst);
+        // Kill the monitor
+        self.monitor.send(Kill);
 
+        // Kill all subtasks.
         for _ in range(0, self.tasks) {
             // Don't double panic.
-            self.tx.send(Quit);
+            let _ = self.jobs.send_opt(Quit);
         }
     }
 }
 
-fn spawn_in_pool(jobs: Arc<Mutex<Receiver<InternalMessage>>>, quit_tx: Sender<()>) {
+fn spawn_in_pool(jobs: Arc<Mutex<Receiver<WorkerMessage>>>,
+                 monitor: Sender<MonitorMessage>) {
     spawn(proc() {
         // Will alert the monitor task on failure.
-        let w = Watcher { channel: quit_tx };
+        let w = Watcher { monitor: monitor };
 
         loop {
-            let message = jobs.lock().recv_opt();
+            let message = {
+                // Only lock jobs for the time it takes
+                // to get a job, not run it.
+                let lock = jobs.lock();
+                lock.recv_opt()
+            };
+
             match message {
                 Ok(Job(job)) => job(),
                 Ok(Quit) => break,
