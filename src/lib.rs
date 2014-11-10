@@ -6,11 +6,6 @@
 
 use std::sync::{Mutex, Arc};
 
-enum WorkerMessage {
-    Quit,
-    Job(proc(): Send)
-}
-
 enum MonitorMessage {
     Died,
     Kill
@@ -31,15 +26,14 @@ impl Drop for Watcher {
 ///
 /// Spawns n + 1 tasks and respawns on subtask panic.
 pub struct TaskPool {
-    jobs: Sender<WorkerMessage>,
+    jobs: Sender<proc(): Send>,
     monitor: Sender<MonitorMessage>,
-    tasks: uint
 }
 
 impl TaskPool {
     /// Create a new TaskPool with n tasks.
     pub fn new(tasks: uint) -> TaskPool {
-        let (job_tx, job_rx) = channel::<WorkerMessage>();
+        let (job_tx, job_rx) = channel::<proc(): Send>();
 
         let (quit_tx, quit_rx) = channel::<MonitorMessage>();
 
@@ -63,12 +57,12 @@ impl TaskPool {
             spawn_in_pool(job_rx.clone(), quit_tx.clone());
         }
 
-        TaskPool { jobs: job_tx, monitor: quit_tx, tasks: tasks }
+        TaskPool { jobs: job_tx, monitor: quit_tx }
     }
 
     /// Run this job on any of the tasks in the taskpool.
     pub fn execute(&mut self, job: proc(): Send) {
-        self.jobs.send(Job(job))
+        self.jobs.send(job)
     }
 }
 
@@ -76,16 +70,10 @@ impl Drop for TaskPool {
     fn drop(&mut self) {
         // Kill the monitor
         self.monitor.send(Kill);
-
-        // Kill all subtasks.
-        for _ in range(0, self.tasks) {
-            // Don't double panic.
-            let _ = self.jobs.send_opt(Quit);
-        }
     }
 }
 
-fn spawn_in_pool(jobs: Arc<Mutex<Receiver<WorkerMessage>>>,
+fn spawn_in_pool(jobs: Arc<Mutex<Receiver<proc(): Send>>>,
                  monitor: Sender<MonitorMessage>) {
     spawn(proc() {
         // Will alert the monitor task on failure.
@@ -100,8 +88,7 @@ fn spawn_in_pool(jobs: Arc<Mutex<Receiver<WorkerMessage>>>,
             };
 
             match message {
-                Ok(Job(job)) => job(),
-                Ok(Quit) => break,
+                Ok(job) => job(),
                 Err(..) => break
             }
         }
