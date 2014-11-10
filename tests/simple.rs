@@ -28,9 +28,7 @@ describe! taskpool {
     it "should recover from subtask panics" {
         // Panic all the existing tasks.
         for _ in range(0, NUMTASKS) {
-            pool.execute(proc() {
-                panic!("Muahaha");
-            });
+            pool.execute(panic);
         }
 
         // Ensure new tasks were spawned to compensate.
@@ -47,9 +45,7 @@ describe! taskpool {
     it "should not panic while dropping if subtasks failed" {
         // Panic all the existing tasks.
         for _ in range(0, NUMTASKS) {
-            pool.execute(proc() {
-                panic!("Muahaha");
-            });
+            pool.execute(panic);
         }
 
         drop(pool);
@@ -59,5 +55,14 @@ describe! taskpool {
         fn is_send<S: Send>(_: S) {}
         is_send(pool);
     }
+}
+
+// Silent panic!
+pub fn panic() {
+    use std::io;
+
+    // Swallow panic output
+    io::stdio::set_stderr(box io::util::NullWriter);
+    panic!()
 }
 
