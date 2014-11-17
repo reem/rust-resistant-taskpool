@@ -1,6 +1,7 @@
+#![deprecated = "std::sync::TaskPool has been replaced with this implementation"]
 #![license = "MIT"]
-#![deny(missing_docs)]
-#![deny(warnings)]
+#![deny(warnings, missing_docs)]
+#![allow(deprecated)]
 
 //! A failure resistant, load balancing task pool.
 
